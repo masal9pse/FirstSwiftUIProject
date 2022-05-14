@@ -1,19 +1,150 @@
-name: Swift
+
+name: CI
 
 on:
   push:
-    branches: [ master ]
+    branches:
+      - master
+      - develop
+    paths-ignore:
+      - Docs/**
+      - README.md
+      - LICENSE
+      - Rambafile
   pull_request:
-    branches: [ master ]
+    branches:
+      - develop
+    paths-ignore:
+      - Docs/**
+      - README.md
+      - LICENSE
+      - Rambafile
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_13.2.1.app
 
 jobs:
-  build:
-
-    runs-on: macos-latest
+  test:
+    runs-on: macOS-latest
+    env:
+      MINT_PATH: mint/lib
+      MINT_LINK_PATH: mint/bin
 
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: swift build -v
-    - name: Run tests
-      run: swift test -v
+    # チェックアウト
+    - uses: actions/checkout@v2
+
+    # Xcodeの一覧出力
+    - name: Show Xcode list
+      run: ls /Applications | grep 'Xcode'
+
+    # Xcodeのバージョン出力
+    - name: Show Xcode version
+      run: xcodebuild -version
+
+    # Gemsのキャッシュ
+    - name: Cache Gems
+      uses: actions/cache@v2
+      with:
+        path: vendor/bundle
+        key: ${{ runner.os }}-gems-${{ hashFiles('**/Gemfile.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-gems-
+
+    # Gemsのインストール
+    - name: Install Bundled Gems
+      run: |
+        bundle config path vendor/bundle
+        bundle install --jobs 4 --retry 3
+
+    # Mintのインストール
+    - name: Install Mint
+      run: brew install mint
+
+    # Mintで管理しているライブラリのキャッシュ
+    - name: Cache Mint packages
+      uses: actions/cache@v2
+      with:
+        path: mint
+        key: ${{ runner.os }}-mint-${{ hashFiles('**/Mintfile') }}
+        restore-keys: |
+          ${{ runner.os }}-mint-
+
+    # Carthageで管理しているライブラリのキャッシュ
+    - name: Cache Carthage packages
+      uses: actions/cache@v2
+      with:
+        path: Carthage
+        key: ${{ runner.os }}-carthage-${{ hashFiles('**/Cartfile.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-carthage-
+
+    # Carthageで管理しているライブラリのインストール
+    - name: Install Carthage frameworks
+      run: |
+        mint run carthage carthage bootstrap --platform iOS --cache-builds
+        echo '*** Resolved dependencies:'
+        cat 'Cartfile.resolved'
+      env:
+        GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # ライセンス表示の生成
+    - name: Generate licenses with LicensePlist
+      run: mint run LicensePlist license-plist --output-path {製品ターゲット名}/Settings.bundle --github-token ${{ secrets.GITHUB_TOKEN }}
+
+    # プロジェクトファイルの生成
+    - name: Generate Xcode project with XcodeGen
+      run: mint run xcodegen xcodegen generate
+
+    # CocoaPodsで管理しているライブラリのキャッシュ
+    - name: Cache Pods
+      uses: actions/cache@v2
+      with:
+        path: Pods
+        key: ${{ runner.os }}-pods-${{ hashFiles('**/Podfile.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-pods-
+
+    # CocoaPodsで管理しているライブラリのインストール
+    - name: Install Pods
+      run: bundle exec pod install
+
+    # ビルド
+    - name: Xcode build
+      run: set -o pipefail &&
+        xcodebuild
+        -sdk iphonesimulator
+        -configuration Debug
+        -workspace {ワークスペース名}.xcworkspace
+        -scheme {スキーム名}
+        build
+        | bundle exec xcpretty
+
+    # 単体テストの実行
+    - name: Xcode test
+      run: set -o pipefail &&
+        xcodebuild
+        -sdk iphonesimulator
+        -configuration Debug
+        -workspace {ワークスペース名}.xcworkspace
+        -scheme {スキーム名}
+        -destination 'platform=iOS Simulator,name=iPhone 11 Pro Max'
+        -skip-testing:{UIテスト}
+        clean test
+        | bundle exec xcpretty --report html
+
+    # コードカバレッジの出力
+    - name: Convert Code coverage to HTML
+      run: bundle exec slather coverage --html --output-directory html_report
+
+    # テスト結果のアップロード
+    - uses: actions/upload-artifact@v2
+      with:
+        name: test-results
+        path: build/reports
+
+    # コードカバレッジのアップロード
+    - uses: actions/upload-artifact@v2
+      with:
+        name: test-coverage
+        path: html_report
